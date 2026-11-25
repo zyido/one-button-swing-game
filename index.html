@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One-button swing — canvas demo</title>
+<style>
+  :root{
+    --bg:#0E1116;
+    --ink:#E8EDF2;
+    --muted:#8B97A6;
+    --accent:#5BD1C4;
+    --warn:#E2604B;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    background:
+      radial-gradient(900px 500px at 50% 0%, rgb(91 209 196 / .10), transparent 60%),
+      var(--bg);
+    color:var(--ink);
+    font-family:system-ui, -apple-system, "Segoe UI", sans-serif;
+    display:grid;
+    place-items:center;
+    min-height:100%;
+    padding:20px;
+  }
+  .stage{width:min(100%,960px)}
+  canvas{display:block;width:100%;height:auto;border-radius:14px;background:#0B0E12;box-shadow:0 30px 60px -40px rgb(0 0 0 / .9);touch-action:none}
+  .bar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:12px;font-size:14px;color:var(--muted)}
+  .bar strong{color:var(--ink);font-weight:600}
+  .status{min-height:20px;font-variant-numeric:tabular-nums}
+  .status[data-state="won"]{color:var(--accent)}
+  .status[data-state="lost"]{color:var(--warn)}
+  kbd{font:inherit;font-size:12px;padding:2px 6px;border:1px solid rgb(232 237 242 / .25);border-radius:5px;color:var(--ink)}
+  .note{margin:14px 0 0;font-size:12.5px;line-height:1.6;color:var(--muted);max-width:74ch}
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="game" width="960" height="540" aria-label="One-button swing demo: hold to grab a hook, release to fly toward the platform"></canvas>
+  <div class="bar">
+    <span><strong>Hold</strong> to grab &middot; <strong>release</strong> to fly &middot; <kbd>R</kbd> restart</span>
+    <span class="status" id="status" role="status" aria-live="polite" data-state="ready">Press and hold to start</span>
+  </div>
+  <p class="note">Fan-made demo of the mechanic. Not the original game and not affiliated with its developer. No original assets are included.</p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext ? canvas.getContext('2d') : null;
+  var statusEl = document.getElementById('status');
+
+  var W = 960;
+  var H = 540;
+  var G = 1500;            // gravity, px/s^2
+  var GRAB_RADIUS = 110;   // how close a hook has to be to catch
+  var MIN_ROPE = 50;       // shortest rope we allow, so a grab cannot pin you to the hook
+  var PLAYER_R = 10;
+
+  var level = {
+    start: { x: 150, y: 150, vx: 140, vy: 0 },
+    platform: { x: 820, y: 400, w: 112, h: 16 },
+    hooks: [
+      { x: 236, y: 148 },
+      { x: 420, y: 190 },
+      { x: 600, y: 230 },
+      { x: 760, y: 270 }
+    ]
+  };
+
+  var state = {
+    mode: 'ready',
+    player: { x: 0, y: 0, vx: 0, vy: 0 },
+    hook: null,
+    theta: 0,
+    omega: 0,
+    rope: 0,
+    holding: false
+  };
+
+  function reset() {
+    state.mode = 'ready';
+    state.player.x = level.start.x;
+    state.player.y = level.start.y;
+    state.player.vx = level.start.vx;
+    state.player.vy = level.start.vy;
+    state.hook = null;
+    state.theta = 0;
+    state.omega = 0;
+    state.rope = 0;
+    state.holding = false;
+    say('ready', 'Press and hold to start');
+  }
+
+  function begin() {
+    state.mode = 'playing';
+    state.player.x = level.start.x;
+    state.player.y = level.start.y;
+    state.player.vx = level.start.vx;
+    state.player.vy = level.start.vy;
+    say('playing', 'Hold to grab a hook');
+  }
+
+  function say(mode, text) {
+    if (!statusEl) return;
+    statusEl.setAttribute('data-state', mode);
+    statusEl.textContent = text;
+  }
+
+  function nearestHook(x, y) {
+    var best = null;
+    var bestDist = GRAB_RADIUS;
+    for (var i = 0; i < level.hooks.length; i++) {
+      var hook = level.hooks[i];
+      var d = Math.hypot(hook.x - x, hook.y - y);
+      if (d <= bestDist) { best = hook; bestDist = d; }
+    }
+    return best;
+  }
+
+  function tryGrab() {
+    if (state.hook) return false;
+    var hook = nearestHook(state.player.x, state.player.y);
+    if (!hook) return false;
+    var dx = state.player.x - hook.x;
+    var dy = state.player.y - hook.y;
+    var rope = Math.max(MIN_ROPE, Math.hypot(dx, dy));
+    var theta = Math.atan2(dy, dx);
+    // Tangent direction at theta is (-sin, cos); project the current velocity
+    // onto it to get the angular velocity the swing starts with.
+    var tx = -Math.sin(theta);
+    var ty = Math.cos(theta);
+    state.hook = hook;
+    state.rope = rope;
+    state.theta = theta;
+    state.omega = (state.player.vx * tx + state.player.vy * ty) / rope;
+    return true;
+  }
+
+  function release() {
+    state.holding = false;
+    if (!state.hook) return;
+    // Leaving the swing with the tangential velocity is what makes release
+    // timing matter: the direction depends on where in the arc you let go.
+    state.player.vx = -state.rope * state.omega * Math.sin(state.theta);
+    state.player.vy = state.rope * state.omega * Math.cos(state.theta);
+    state.hook = null;
+  }
+
+  function press() {
+    state.holding = true;
+    if (state.mode === 'ready') begin();
+    if (state.mode === 'playing') tryGrab();
+  }
+
+  function step(dt) {
+    if (state.mode !== 'playing') return state.mode;
+    var p = state.player;
+
+    if (state.hook) {
+      // Pendulum: alpha = g * cos(theta) / rope. theta is measured from the
+      // +x axis with y pointing down, so gravity always pulls toward pi/2.
+      var alpha = (G * Math.cos(state.theta)) / state.rope;
+      state.omega += alpha * dt;
+      state.theta += state.omega * dt;
+      p.x = state.hook.x + state.rope * Math.cos(state.theta);
+      p.y = state.hook.y + state.rope * Math.sin(state.theta);
+      p.vx = -state.rope * state.omega * Math.sin(state.theta);
+      p.vy = state.rope * state.omega * Math.cos(state.theta);
+    } else {
+      p.vy += G * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (state.holding) tryGrab();
+    }
+
+    var plat = level.platform;
+    if (
+      p.vy >= 0 &&
+      p.x > plat.x - PLAYER_R && p.x < plat.x + plat.w + PLAYER_R &&
+      p.y >= plat.y - PLAYER_R && p.y <= plat.y + plat.h
+    ) {
+      state.mode = 'won';
+      say('won', 'You made it — press R to run it again');
+      return state.mode;
+    }
+    if (p.y > H + 120) {
+      state.mode = 'lost';
+      say('lost', 'You fell — press R to try again');
+      return state.mode;
+    }
+    return state.mode;
+  }
+
+  /* ---------- drawing ---------- */
+
+  function draw() {
+    if (!ctx) return;
+    ctx.clearRect(0, 0, W, H);
+
+    var bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#11161D');
+    bg.addColorStop(1, '#0A0D11');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = 'rgba(139,151,166,.10)';
+    ctx.lineWidth = 1;
+    for (var gx = 0; gx < W; gx += 48) {
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke();
+    }
+    for (var gy = 0; gy < H; gy += 48) {
+      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
+    }
+
+    var plat = level.platform;
+    ctx.fillStyle = '#1B2430';
+    ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+    ctx.fillStyle = '#5BD1C4';
+    ctx.fillRect(plat.x, plat.y, plat.w, 3);
+
+    for (var i = 0; i < level.hooks.length; i++) {
+      var hook = level.hooks[i];
+      var near = !state.hook && Math.hypot(hook.x - state.player.x, hook.y - state.player.y) <= GRAB_RADIUS;
+      ctx.beginPath();
+      ctx.arc(hook.x, hook.y, 9, 0, Math.PI * 2);
+      ctx.strokeStyle = near ? '#5BD1C4' : 'rgba(232,237,242,.55)';
+      ctx.lineWidth = near ? 3 : 2;
+      ctx.stroke();
+      if (near) {
+        ctx.beginPath();
+        ctx.arc(hook.x, hook.y, GRAB_RADIUS, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(91,209,196,.16)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+    }
+
+    var p = state.player;
+    if (state.hook) {
+      ctx.beginPath();
+      ctx.moveTo(state.hook.x, state.hook.y);
+      ctx.lineTo(p.x, p.y);
+      ctx.strokeStyle = 'rgba(232,237,242,.75)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // stick figure: head, body, two arms toward the rope, two legs
+    var headY = p.y - 16;
+    ctx.strokeStyle = '#E8EDF2';
+    ctx.fillStyle = '#E8EDF2';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(p.x, headY, 7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p.x, headY + 7);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    var armAngle = state.hook ? Math.atan2(state.hook.y - p.y, state.hook.x - p.x) : -Math.PI / 2;
+    var ax = Math.cos(armAngle) * 14;
+    var ay = Math.sin(armAngle) * 14;
+    ctx.beginPath();
+    ctx.moveTo(p.x, headY + 12);
+    ctx.lineTo(p.x + ax, headY + 12 + ay);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x - 8, p.y + 14);
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x + 8, p.y + 14);
+    ctx.stroke();
+
+    if (state.mode === 'won') {
+      ctx.fillStyle = 'rgba(91,209,196,.92)';
+      ctx.font = '600 22px system-ui, sans-serif';
+      ctx.fillText('Landed', plat.x - 6, plat.y - 22);
+    }
+  }
+
+  /* ---------- input and loop ---------- */
+
+  var last = 0;
+  var acc = 0;
+  var FIXED = 1 / 120;
+
+  function frame(now) {
+    if (!last) last = now;
+    var elapsed = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    acc += elapsed;
+    while (acc >= FIXED) {
+      step(FIXED);
+      acc -= FIXED;
+    }
+    draw();
+    if (window.requestAnimationFrame) window.requestAnimationFrame(frame);
+  }
+
+  function isSpace(e) {
+    return e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar';
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    e.preventDefault();
+    if (state.mode === 'won' || state.mode === 'lost') reset();
+    press();
+  });
+  window.addEventListener('pointerup', release);
+  window.addEventListener('pointercancel', release);
+
+  window.addEventListener('keydown', function (e) {
+    if (isSpace(e)) {
+      e.preventDefault();
+      if (!e.repeat) {
+        if (state.mode === 'won' || state.mode === 'lost') reset();
+        press();
+      }
+      return;
+    }
+    if (e.key === 'r' || e.key === 'R') {
+      reset();
+    }
+  });
+  window.addEventListener('keyup', function (e) {
+    if (isSpace(e)) release();
+  });
+
+  reset();
+  draw();
+  if (window.requestAnimationFrame) window.requestAnimationFrame(frame);
+
+  /* The demo keeps its state on one object and advances it in step(dt), so the
+     physics can be exercised without a browser: window.__demo.step(1/120). */
+  window.__demo = {
+    state: state,
+    level: level,
+    constants: { G: G, GRAB_RADIUS: GRAB_RADIUS, MIN_ROPE: MIN_ROPE, W: W, H: H },
+    step: step,
+    draw: draw,
+    press: press,
+    release: release,
+    reset: reset,
+    nearestHook: nearestHook
+  };
+})();
+</script>
+</body>
+</html>
