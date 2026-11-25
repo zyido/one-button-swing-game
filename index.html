@@ -73,6 +73,17 @@
     ]
   };
 
+  function fitCanvas() {
+    var dpr = window.devicePixelRatio || 1;
+    var width = Math.round(W * dpr);
+    var height = Math.round(H * dpr);
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    canvas.style.aspectRatio = W + ' / ' + H;
+    // Resizing the backing store resets the context, so the scale goes on after.
+    if (ctx && ctx.setTransform) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
   var state = {
     mode: 'ready',
     player: { x: 0, y: 0, vx: 0, vy: 0 },
@@ -333,7 +344,12 @@
   });
 
   reset();
+  fitCanvas();
   draw();
+  window.addEventListener('resize', function () {
+    fitCanvas();
+    draw();
+  });
   if (window.requestAnimationFrame) window.requestAnimationFrame(frame);
 
   /* The demo keeps its state on one object and advances it in step(dt), so the
@@ -344,6 +360,7 @@
     constants: { G: G, GRAB_RADIUS: GRAB_RADIUS, MIN_ROPE: MIN_ROPE, W: W, H: H },
     step: step,
     draw: draw,
+    fitCanvas: fitCanvas,
     press: press,
     release: release,
     reset: reset,
